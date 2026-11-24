@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WaniKani Clip Hotkey
 // @namespace    wk-clip-hotkey
-// @version      1.0.0
+// @version      1.1.0
 // @description  Press a hotkey during reviews/lessons to play a real anime/drama/game clip (screenshot + audio from Immersion Kit) using the current word or kanji.
 // @author       Snackwrap
 // @homepageURL  https://github.com/Snackwrap/wanikani-clip-hotkey
@@ -21,6 +21,7 @@
  *   Alt+Shift+V    previous clip
  *   Alt+R          replay the current clip
  *   Alt+Y          open a YouGlish video search for the word in a new tab
+ *   Alt+A          turn autoplay-after-correct-answer on/off (remembered)
  *   Esc            close the panel
  *   Click the screenshot to replay; click the blurred translation to reveal it.
  *
@@ -35,7 +36,13 @@
         next: 'KeyV',     // with Alt
         replay: 'KeyR',   // with Alt
         youglish: 'KeyY', // with Alt
+        autoplay: 'KeyA', // with Alt: toggles autoplay
     };
+    // Autoplay a clip after a correct answer. Alt+A toggles it; your choice is remembered.
+    // This is only the starting value before you've ever pressed Alt+A.
+    const AUTOPLAY_DEFAULT = false;
+    // Which correct answers trigger autoplay: 'any' (meaning or reading) or 'reading' only.
+    const AUTOPLAY_ON = 'any';
     const BLUR_TRANSLATION = true;   // hide the English until clicked (it can spoil the meaning)
     const MAX_CLIPS = 40;            // how many clips to keep per item
     const VOLUME = 0.9;
@@ -55,6 +62,13 @@
     let loading = null;          // in-flight Promise
     const searchCache = new Map();
     let titleIndexPromise = null;
+    const AUTOPLAY_STORE_KEY = 'wk-clip-hotkey.autoplay';
+    let autoplayEnabled = (() => {
+        const saved = localStorage.getItem(AUTOPLAY_STORE_KEY);
+        return saved === null ? AUTOPLAY_DEFAULT : saved === 'true';
+    })();
+    let questionType = null;     // 'meaning' | 'reading' (from WaniKani's event, if provided)
+    let autoplayedThisQuestion = false;
 
     // ---------- Current item ----------
     window.addEventListener('willShowNextQuestion', (e) => {
@@ -62,8 +76,54 @@
         if (subject?.characters !== undefined) {
             currentSubject = {characters: subject.characters, type: subject.type};
         }
+        questionType = e.detail?.questionType ?? null;
+        autoplayedThisQuestion = false;
         closePanel();
     });
+
+    // ---------- Autoplay after a correct answer ----------
+    // Two independent signals, because WaniKani's internal event has changed before:
+    //  1. the didAnswerQuestion event reporting results.action === 'pass'
+    //  2. the answer box container getting correct="true"
+    window.addEventListener('didAnswerQuestion', (e) => {
+        const result = e.detail?.results;
+        if (result?.action === 'pass' || result?.passed === true) onCorrectAnswer(e.detail?.questionType);
+    });
+
+    new MutationObserver((mutations) => {
+        for (const m of mutations) {
+            if (m.target instanceof Element
+                && m.target.matches('.quiz-input__input-container')
+                && m.target.getAttribute('correct') === 'true') {
+                onCorrectAnswer();
+                return;
+            }
+        }
+    }).observe(document.documentElement, {subtree: true, attributes: true, attributeFilter: ['correct']});
+
+    function currentQuestionType(fromEvent) {
+        if (fromEvent) return fromEvent;
+        if (questionType) return questionType;
+        const lang = document.querySelector('#user-response')?.getAttribute('lang');
+        return lang === 'ja' ? 'reading' : lang ? 'meaning' : null;
+    }
+
+    function onCorrectAnswer(typeFromEvent) {
+        if (!autoplayEnabled || autoplayedThisQuestion) return;
+        if (AUTOPLAY_ON === 'reading' && currentQuestionType(typeFromEvent) !== 'reading') return;
+        autoplayedThisQuestion = true;
+        const item = getCurrentItem();
+        if (!item || item.isRadical) return;
+        if (panel && clipsFor === keywordFor(item.characters) && clips[clipIndex]) return; // already showing one
+        step(1, {auto: true});
+    }
+
+    function toggleAutoplay() {
+        autoplayEnabled = !autoplayEnabled;
+        try { localStorage.setItem(AUTOPLAY_STORE_KEY, String(autoplayEnabled)); } catch { /* ignore */ }
+        const scope = AUTOPLAY_ON === 'reading' ? 'correct readings' : 'correct answers';
+        toast(autoplayEnabled ? `Autoplay ON: a clip plays after ${scope}` : 'Autoplay OFF');
+    }
 
     function getCurrentItem() {
         // Prefer the page header so this keeps working if the event shape changes.
@@ -150,7 +210,7 @@
         render();
     }
 
-    async function step(delta) {
+    async function step(delta, {auto = false} = {}) {
         const item = getCurrentItem();
         if (!item) return;
         if (item.isRadical) { openPanel(); showMessage('Radicals have no clips. Try it on a kanji or vocab item.'); return; }
@@ -173,7 +233,10 @@
             } finally {
                 if (loading === thisLoad) loading = null;
             }
-            if (!clips.length) { showMessage(`No clips found for ${keyword}.`); return; }
+            if (!clips.length) {
+                if (auto) closePanel(); else showMessage(`No clips found for ${keyword}.`);
+                return;
+            }
         }
         if (!clips.length) return;
         clipIndex = (clipIndex + delta + clips.length) % clips.length;
@@ -203,16 +266,33 @@
     #wkch-panel .wkch-close{position:absolute;top:6px;right:8px;background:rgba(0,0,0,.55);color:#fff;border:0;
       border-radius:50%;width:26px;height:26px;cursor:pointer;font-size:15px;line-height:26px}
     #wkch-panel.wkch-playing .wkch-img{outline:3px solid #ffd54a;outline-offset:-3px}
-    #wkch-panel .wkch-msg{padding:14px}`;
+    #wkch-panel .wkch-msg{padding:14px}
+    #wkch-toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:100000;
+      background:#1f2024;color:#f2f2f2;padding:8px 14px;border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.4);
+      font:14px/1.4 system-ui,-apple-system,sans-serif;pointer-events:none}`;
+
+    function ensureStyle() {
+        if (document.getElementById('wkch-style')) return;
+        const style = document.createElement('style');
+        style.id = 'wkch-style';
+        style.textContent = CSS;
+        document.head.appendChild(style);
+    }
+
+    let toastTimer = null;
+    function toast(text) {
+        ensureStyle();
+        document.getElementById('wkch-toast')?.remove();
+        const node = el('div', {id: 'wkch-toast', textContent: text});
+        document.body.appendChild(node);
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => node.remove(), 1800);
+        render(); // refresh the hint line if the panel is open
+    }
 
     function openPanel() {
         if (panel) return;
-        if (!document.getElementById('wkch-style')) {
-            const style = document.createElement('style');
-            style.id = 'wkch-style';
-            style.textContent = CSS;
-            document.head.appendChild(style);
-        }
+        ensureStyle();
         panel = document.createElement('div');
         panel.id = 'wkch-panel';
         document.body.appendChild(panel);
@@ -267,7 +347,7 @@
                 el('span', {textContent: clip.source}),
                 el('span', {textContent: `${clipIndex + 1} / ${clips.length}`}),
             ]),
-            el('div', {className: 'wkch-hint', textContent: 'Alt+V next · Alt+Shift+V prev · Alt+R replay · Alt+Y YouGlish · Esc close'}),
+            el('div', {className: 'wkch-hint', textContent: `Alt+V next · Alt+Shift+V prev · Alt+R replay · Alt+Y YouGlish · Alt+A autoplay ${autoplayEnabled ? 'on' : 'off'} · Esc close`}),
         ]));
         panel.replaceChildren(...nodes);
     }
@@ -288,6 +368,7 @@
         if (e.code === KEYS.next) step(e.shiftKey ? -1 : 1);
         else if (e.code === KEYS.replay && !e.shiftKey) { if (clips[clipIndex] && panel) playCurrent(); else step(1); }
         else if (e.code === KEYS.youglish && !e.shiftKey) openYouGlish();
+        else if (e.code === KEYS.autoplay && !e.shiftKey) toggleAutoplay();
         else handled = false;
 
         if (handled) {
