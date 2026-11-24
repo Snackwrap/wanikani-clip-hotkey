@@ -1,5 +1,7 @@
 # WaniKani Clip Hotkey
 
+![WaniKani Clip Hotkey: press Alt+V in reviews to play a real anime clip for the word on screen](docs/promo.png)
+
 A userscript for [WaniKani](https://www.wanikani.com). Press a hotkey during reviews or lessons to hear the current word or kanji used in a real anime, drama or game. Each clip is a screenshot plus the audio of the line, from [Immersion Kit](https://www.immersionkit.com).
 
 ## Install
